@@ -68,15 +68,21 @@ const processVideoInput = async (videoInput) => {
     // If it's a base64 string, convert it
     if (videoInput.startsWith('data:video/')) {
       logger.info("Converting base64 video data");
+
+      // Extract MIME type from data URL
+      const mimeTypeMatch = videoInput.match(/data:([^;]+)/);
+      const mimeType = mimeTypeMatch ? mimeTypeMatch[1] : 'video/mp4';
+
       const base64Data = videoInput.split(',')[1];
       const buffer = Buffer.from(base64Data, 'base64');
 
-      // Create a simple Blob like in our successful test
-      const blob = new Blob([buffer], { type: 'video/webm' });
+      // Create a blob with the correct MIME type
+      const blob = new Blob([buffer], { type: mimeType });
 
       logger.info("Created video blob:", {
         size: blob.size,
-        type: blob.type
+        type: blob.type,
+        detectedMimeType: mimeType
       });
 
       return blob;
@@ -503,33 +509,39 @@ exports.generatePupilAnalysis = onCall(async (request) => {
       let mediaInput = videoBlob;
 
       if (videoBlob instanceof Blob) {
-        // Write blob to temporary file and create Gradio FileData object
-        const tempFilePath = `/tmp/video_${Date.now()}.webm`;
+        // NEW APPROACH: Use base64 direct approach (like test-local.js)
+        logger.info("Using base64 direct approach (API now supports this!)");
+
+        // Convert blob back to base64 data URL
         const buffer = await videoBlob.arrayBuffer();
-        fs.writeFileSync(tempFilePath, Buffer.from(buffer));
+        const bufferData = Buffer.from(buffer);
+        const blobType = videoBlob.type || 'video/mp4';
 
-        // Create proper Gradio FileData object
-        mediaInput = {
-          path: tempFilePath,
-          url: null,
-          size: buffer.byteLength,
-          orig_name: "uploaded_video.webm",
-          mime_type: "video/webm",
-          is_stream: false,
-          meta: { _type: "gradio.FileData" }
-        };
+        // Create base64 data URL
+        const base64Data = bufferData.toString('base64');
+        const dataUrl = `data:${blobType};base64,${base64Data}`;
 
-        logger.info("Created Gradio FileData object:", {
-          path: tempFilePath,
-          size: buffer.byteLength,
-          exists: fs.existsSync(tempFilePath)
+        logger.info("Base64 data URL created:", {
+          mimeType: blobType,
+          dataLength: dataUrl.length,
+          isVideo: blobType.startsWith('video/'),
+          isImage: blobType.startsWith('image/')
         });
+
+        // Pass the base64 data URL directly to the API
+        mediaInput = dataUrl;
       }
 
       // Use the API Testing tab (index 2) which uses process_media_unified
       // This matches the gr.Blocks structure in pupilsense_hf_deploy/gradio_app.py
-      logger.info("Calling API Testing tab (process_media_unified) - index 2");
-      logger.info(`Calling ${mediaInput} ${data.pupil_selection} ${data.tv_model} ${data.blink_detection}`);
+      logger.info("Calling /process_media_unified endpoint with base64 data");
+      logger.info("API Parameters:", {
+        mediaInputType: typeof mediaInput,
+        mediaInputLength: mediaInput.length,
+        pupil_selection: data.pupil_selection || "both",
+        tv_model: data.tv_model || "ResNet18",
+        blink_detection: data.blink_detection !== undefined ? data.blink_detection : true
+      });
       result = await client.predict(
         // 2,  // Index 2 = API Testing tab with process_media_unified
         "/process_media_unified", {
@@ -796,40 +808,46 @@ exports.generatePupilAnalysisHttp = onRequest(async (req, res) => {
       let mediaInput = videoBlob;
 
       if (videoBlob instanceof Blob) {
-        // Write blob to temporary file and create Gradio FileData object
-        const tempFilePath = `/tmp/video_${Date.now()}.webm`;
+        // NEW APPROACH: Use base64 direct approach (like test-local.js)
+        logger.info("HTTP: Using base64 direct approach (API now supports this!)");
+
+        // Convert blob back to base64 data URL
         const buffer = await videoBlob.arrayBuffer();
-        fs.writeFileSync(tempFilePath, Buffer.from(buffer));
+        const bufferData = Buffer.from(buffer);
+        const blobType = videoBlob.type || 'video/mp4';
 
-        // Create proper Gradio FileData object
-        mediaInput = {
-          path: tempFilePath,
-          url: null,
-          size: buffer.byteLength,
-          orig_name: "uploaded_video.webm",
-          mime_type: "video/webm",
-          is_stream: false,
-          meta: { _type: "gradio.FileData" }
-        };
+        // Create base64 data URL
+        const base64Data = bufferData.toString('base64');
+        const dataUrl = `data:${blobType};base64,${base64Data}`;
 
-        logger.info("HTTP: Created Gradio FileData object:", {
-          path: tempFilePath,
-          size: buffer.byteLength,
-          exists: fs.existsSync(tempFilePath)
+        logger.info("HTTP: Base64 data URL created:", {
+          mimeType: blobType,
+          dataLength: dataUrl.length,
+          isVideo: blobType.startsWith('video/'),
+          isImage: blobType.startsWith('image/')
         });
+
+        // Pass the base64 data URL directly to the API
+        mediaInput = dataUrl;
       }
 
       // Use the API Testing tab (index 2) which uses process_media_unified
       // This matches the gr.Blocks structure in pupilsense_hf_deploy/gradio_app.py
-      logger.info("HTTP: Calling API Testing tab (process_media_unified) - index 2");
+      logger.info("HTTP: Calling /process_media_unified endpoint with base64 data");
+      logger.info("HTTP: API Parameters:", {
+        mediaInputType: typeof mediaInput,
+        mediaInputLength: mediaInput.length,
+        pupil_selection: pupil_selection || "both",
+        tv_model: tv_model || "ResNet18",
+        blink_detection: blink_detection !== undefined ? blink_detection : true
+      });
 
-      result = await client.predict(
-        2,  // Index 2 = API Testing tab with process_media_unified
-        mediaInput,
-        pupil_selection || "both",
-        tv_model || "ResNet18",
-        blink_detection !== undefined ? blink_detection : true
-      );
+      result = await client.predict("/process_media_unified", {
+        media_input: mediaInput,
+        pupil_selection: pupil_selection || "both",
+        tv_model: tv_model || "ResNet18",
+        blink_detection: blink_detection !== undefined ? blink_detection : true
+      });
 
       logger.info(`HTTP: Processing successful with ${workingEndpoint}`);
 

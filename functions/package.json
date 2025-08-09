@@ -6,7 +6,10 @@
     "shell": "firebase functions:shell",
     "start": "npm run shell",
     "deploy": "firebase deploy --only functions",
-    "logs": "firebase functions:log"
+    "logs": "firebase functions:log",
+    "test": "node test-local.js",
+    "test-local": "node test-local.js",
+    "test-base64": "node test-base64.js"
   },
   "engines": {
     "node": "22"

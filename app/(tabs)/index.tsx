@@ -87,9 +87,16 @@ export default function HomeScreen() {
         encoding: FileSystem.EncodingType.Base64,
       });
 
-      // Create data URL format
-      const videoDataUrl = `data:video/webm;base64,${base64Video}`;
+      // Detect video format from file extension
+      const fileExtension = selectedVideo.split('.').pop()?.toLowerCase() || 'mp4';
+      const mimeType = fileExtension === 'webm' ? 'video/webm' :
+                      fileExtension === 'mov' ? 'video/quicktime' :
+                      fileExtension === 'avi' ? 'video/x-msvideo' : 'video/mp4';
+
+      // Create data URL format with correct MIME type
+      const videoDataUrl = `data:${mimeType};base64,${base64Video}`;
       console.log(`Video converted to base64, size: ${(base64Video.length / 1024 / 1024).toFixed(2)} MB`);
+      console.log(`Detected format: ${fileExtension}, MIME type: ${mimeType}`);
 
       const firebaseResult = await generatePupilAnalysis({
         video_input: videoDataUrl,
