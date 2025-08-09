@@ -6,7 +6,10 @@
     "shell": "firebase functions:shell",
     "start": "npm run shell",
     "deploy": "firebase deploy --only functions",
-    "logs": "firebase functions:log"
+    "logs": "firebase functions:log",
+    "test": "node test-local.js",
+    "test-local": "node test-local.js",
+    "test-base64": "node test-base64.js"
   },
   "engines": {
     "node": "22"
@@ -16,7 +19,9 @@
     "@gradio/client": "^1.15.6",
     "axios": "^1.10.0",
     "firebase-admin": "^12.6.0",
-    "firebase-functions": "^6.0.1"
+    "firebase-functions": "^6.0.1",
+    "form-data": "^4.0.0",
+    "multer": "^1.4.5-lts.1"
   },
   "devDependencies": {
     "firebase-functions-test": "^3.1.0"
