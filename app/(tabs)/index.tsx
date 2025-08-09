@@ -1,362 +1,306 @@
-import { Audio } from 'expo-av';
-import * as FileSystem from 'expo-file-system';
 import React, { useState } from 'react';
 import {
-    ActivityIndicator,
-    Alert,
-    SafeAreaView,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View
+  View,
+  Text,
+  StyleSheet,
+  SafeAreaView,
+  TouchableOpacity,
+  ScrollView,
+  Alert,
+  ActivityIndicator,
+  Image,
 } from 'react-native';
-import { generateTTSViaFirebase } from '../../services/ttsService';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system';
+import { generatePupilAnalysis, testConnection } from '../../lib/firebase';
 
-// Define types for our data structures
-interface HistoryItem {
-  id: number;
-  text: string;
-  exaggeration: number;
-  temperature: number;
-  seed: number;
-  cfgw: number;
-  uri: string;
-  timestamp: string;
+interface AnalysisResult {
+  success: boolean;
+  data?: {
+    analysisUrl?: string;
+    results?: any;
+    summary?: string;
+    metadata?: {
+      timestamp: string;
+      processingTime?: number;
+      workingEndpoint?: string;
+    };
+  };
+  error?: string;
 }
 
-function TTSScreen() {
-  const [text, setText] = useState<string>('');
-  const [isGenerating, setIsGenerating] = useState<boolean>(false);
-  const [isPlaying, setIsPlaying] = useState<boolean>(false);
-  const [exaggeration, setExaggeration] = useState<number>(0.5);
-  const [temperature, setTemperature] = useState<number>(0.8);
-  const [seed, setSeed] = useState<number>(0);
-  const [cfgw, setCfgw] = useState<number>(0.5);
-  const [audioUri, setAudioUri] = useState<string | null>(null);
-  const [history, setHistory] = useState<HistoryItem[]>([]);
+export default function HomeScreen() {
+  const [selectedVideo, setSelectedVideo] = useState<string | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
+  const [pupilSelection, setPupilSelection] = useState<string>('both');
+  const [tvModel, setTvModel] = useState<string>('ResNet18');
+  const [blinkDetection, setBlinkDetection] = useState<boolean>(true);
 
-  // Generate TTS using Firebase Functions
-  const generateTTSAudio = async () => {
-    if (!text.trim()) {
-      Alert.alert('Error', 'Please enter some text to convert to speech');
-      return;
-    }
-
-    if (text.trim().length > 300) {
-      Alert.alert('Error', 'Text must be 300 characters or less');
-      return;
-    }
-
-    setIsGenerating(true);
-
+  const selectVideo = async () => {
     try {
-      // Call Firebase Function to generate TTS
-      const result = await generateTTSViaFirebase({
-        text_input: text.trim(),
-        exaggeration_input: exaggeration,
-        temperature_input: temperature,
-        seed_num_input: seed,
-        cfgw_input: cfgw,
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ['video/*'],
+        copyToCacheDirectory: true,
       });
 
-      console.log('Firebase TTS Result:', result);
-
-      // Check if the request was successful
-      if (!result.success) {
-        throw new Error(result.error || 'TTS generation failed');
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const asset = result.assets[0];
+        console.log('Selected video:', asset.uri);
+        setSelectedVideo(asset.uri);
+        setAnalysisResult(null); // Clear previous results
       }
-
-      // Extract audio URL from the response
-      const audioUrl = result.data.audioUrl;
-      if (!audioUrl) {
-        throw new Error('No audio URL received from server');
-      }
-
-      // Download and save the audio file
-      const fileName = `tts_${Date.now()}.wav`;
-      const fileUri = `${FileSystem.documentDirectory}${fileName}`;
-
-      const downloadResult = await FileSystem.downloadAsync(audioUrl, fileUri);
-
-      if (downloadResult.status !== 200) {
-        throw new Error(`Failed to download audio file: ${downloadResult.status}`);
-      }
-
-      setAudioUri(fileUri);
-
-      // Create a history entry
-      const historyItem: HistoryItem = {
-        id: Date.now(),
-        text: text.trim(),
-        exaggeration,
-        temperature,
-        seed,
-        cfgw,
-        uri: fileUri,
-        timestamp: new Date().toLocaleString()
-      };
-
-      setHistory(prev => [historyItem, ...prev.slice(0, 9)]); // Keep last 10
-
-      // Auto-play the generated audio
-      await playAudio(fileUri);
-
-      Alert.alert('Success', 'High-quality speech generated with Chatterbox!');
-
     } catch (error) {
-      console.error('TTS Error:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-      Alert.alert('TTS Error', `Failed to generate speech: ${errorMessage}`);
-    } finally {
-      setIsGenerating(false);
+      console.error('Error selecting video:', error);
+      Alert.alert('Error', 'Failed to select video');
     }
   };
 
-  // Play audio function
-  const playAudio = async (uri: string) => {
+  const analyzeVideo = async () => {
+    if (!selectedVideo) {
+      Alert.alert('Error', 'Please select a video first');
+      return;
+    }
+
+    setIsAnalyzing(true);
+    setAnalysisResult(null);
+
     try {
-      setIsPlaying(true);
-      
-      // Unload any existing sound first
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        staysActiveInBackground: false,
-        playsInSilentModeIOS: true,
-        shouldDuckAndroid: true,
-        playThroughEarpieceAndroid: false,
-      });
+      console.log('Starting pupil analysis...');
 
-      const { sound } = await Audio.Sound.createAsync(
-        { uri },
-        { shouldPlay: true }
-      );
+      // Check file size first
+      const fileInfo = await FileSystem.getInfoAsync(selectedVideo);
+      if (fileInfo.exists && fileInfo.size) {
+        const fileSizeMB = fileInfo.size / (1024 * 1024);
+        console.log(`Video file size: ${fileSizeMB.toFixed(2)} MB`);
 
-      // Set up playback status update
-      sound.setOnPlaybackStatusUpdate((status) => {
-        if (status.isLoaded && status.didJustFinish) {
-          setIsPlaying(false);
-          sound.unloadAsync();
+        if (fileSizeMB > 50) {
+          Alert.alert('File Too Large', 'Please select a video file smaller than 50MB');
+          return;
         }
+      }
+
+      console.log('Converting video to base64...');
+
+      // Convert video file to base64
+      const base64Video = await FileSystem.readAsStringAsync(selectedVideo, {
+        encoding: FileSystem.EncodingType.Base64,
       });
 
-    } catch (error) {
-      console.error('Error playing audio:', error);
-      Alert.alert('Error', 'Failed to play audio');
-      setIsPlaying(false);
-    }
-  };
+      // Create data URL format
+      const videoDataUrl = `data:video/webm;base64,${base64Video}`;
+      console.log(`Video converted to base64, size: ${(base64Video.length / 1024 / 1024).toFixed(2)} MB`);
 
-  // Stop audio playback
-  const stopAudio = async () => {
-    try {
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        staysActiveInBackground: false,
-        playsInSilentModeIOS: true,
-        shouldDuckAndroid: true,
-        playThroughEarpieceAndroid: false,
+      const firebaseResult = await generatePupilAnalysis({
+        video_input: videoDataUrl,
+        pupil_selection: pupilSelection,
+        tv_model: tvModel,
+        blink_detection: blinkDetection,
       });
-      setIsPlaying(false);
+
+      // Extract the actual result from Firebase callable response
+      const result = firebaseResult.data as AnalysisResult;
+      console.log('Analysis result:', result);
+      setAnalysisResult(result);
+
+      if (result.success) {
+        Alert.alert('Analysis Complete', 'Pupil analysis completed successfully!');
+      } else {
+        Alert.alert('Analysis Failed', result.error || 'Unknown error occurred');
+      }
     } catch (error) {
-      console.error('Error stopping audio:', error);
+      console.error('Analysis error:', error);
+      setAnalysisResult({
+        success: false,
+        error: error instanceof Error ? error.message : 'Analysis failed',
+      });
+      Alert.alert('Error', 'Failed to analyze video');
+    } finally {
+      setIsAnalyzing(false);
     }
   };
 
-  // Play history item
-  const playHistoryItem = async (item: HistoryItem) => {
+  const clearSelection = () => {
+    setSelectedVideo(null);
+    setAnalysisResult(null);
+  };
+
+  const testConnectionToAPI = async () => {
     try {
-      await playAudio(item.uri);
+      console.log('Testing connection to PupilSense API...');
+      const result = await testConnection({});
+      console.log('Connection test result:', result);
+
+      if (result.data.success) {
+        Alert.alert('Connection Test', 'Successfully connected to PupilSense API!');
+      } else {
+        Alert.alert('Connection Test Failed', result.data.error || 'Unknown error');
+      }
     } catch (error) {
-      console.error('Error playing history item:', error);
-      Alert.alert('Error', 'Failed to play audio');
-      setIsPlaying(false);
+      console.error('Connection test error:', error);
+      Alert.alert('Connection Test Error', error instanceof Error ? error.message : 'Failed to test connection');
     }
-  };
-
-  // Clear text
-  const clearText = () => {
-    setText('');
-  };
-
-  // Reset parameters to defaults
-  const resetParameters = () => {
-    setExaggeration(0.5);
-    setTemperature(0.8);
-    setSeed(0);
-    setCfgw(0.5);
   };
 
   return (
     <SafeAreaView style={styles.container}>
-      <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
+      <ScrollView contentContainerStyle={styles.scrollContent}>
         <View style={styles.header}>
-          <Text style={styles.title}>Text-to-Speech</Text>
-          <Text style={styles.subtitle}>Convert your text to natural speech with Chatterbox</Text>
+          <Text style={styles.title}>👁️ PupilSense</Text>
+          <Text style={styles.subtitle}>Pupil Diameter Analysis</Text>
+
+          <TouchableOpacity style={styles.testButton} onPress={testConnectionToAPI}>
+            <Text style={styles.testButtonText}>🔗 Test API Connection</Text>
+          </TouchableOpacity>
         </View>
 
-        {/* Text Input */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Enter Text (Max 300 characters)</Text>
-          <TextInput
-            style={styles.textInput}
-            placeholder="Type or paste your text here..."
-            value={text}
-            onChangeText={setText}
-            multiline
-            numberOfLines={4}
-            maxLength={300}
-          />
-          <View style={styles.textInfo}>
-            <Text style={[styles.charCount, text.length > 300 && styles.charCountError]}>
-              {text.length}/300 characters
+        <View style={styles.uploadSection}>
+          <TouchableOpacity style={styles.uploadButton} onPress={selectVideo}>
+            <Text style={styles.uploadButtonText}>
+              {selectedVideo ? '📹 Change Video' : '📹 Select Video'}
             </Text>
-            <TouchableOpacity onPress={clearText} style={styles.clearButton}>
-              <Text style={styles.clearButtonText}>Clear</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
+          </TouchableOpacity>
 
-        {/* Parameters */}
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Voice Parameters</Text>
-            <TouchableOpacity onPress={resetParameters} style={styles.resetButton}>
-              <Text style={styles.resetButtonText}>Reset</Text>
-            </TouchableOpacity>
-          </View>
-          
-          {/* Exaggeration */}
-          <View style={styles.parameterRow}>
-            <Text style={styles.parameterLabel}>Exaggeration: {exaggeration.toFixed(2)}</Text>
-            <View style={styles.sliderContainer}>
-              <Text style={styles.sliderLabel}>0</Text>
-              <View style={styles.slider}>
-                <TouchableOpacity 
-                  style={[styles.sliderTrack, { width: `${exaggeration * 100}%` }]}
-                  onPress={() => {}}
-                />
-              </View>
-              <Text style={styles.sliderLabel}>1</Text>
-            </View>
-          </View>
-
-          {/* Temperature */}
-          <View style={styles.parameterRow}>
-            <Text style={styles.parameterLabel}>Temperature: {temperature.toFixed(2)}</Text>
-            <View style={styles.sliderContainer}>
-              <Text style={styles.sliderLabel}>0</Text>
-              <View style={styles.slider}>
-                <TouchableOpacity 
-                  style={[styles.sliderTrack, { width: `${temperature * 100}%` }]}
-                  onPress={() => {}}
-                />
-              </View>
-              <Text style={styles.sliderLabel}>1</Text>
-            </View>
-          </View>
-
-          {/* Seed */}
-          <View style={styles.parameterRow}>
-            <Text style={styles.parameterLabel}>Seed: {seed}</Text>
-            <View style={styles.seedControls}>
-              <TouchableOpacity 
-                style={styles.seedButton}
-                onPress={() => setSeed(Math.max(0, seed - 1))}
-              >
-                <Text style={styles.seedButtonText}>-</Text>
-              </TouchableOpacity>
-              <Text style={styles.seedValue}>{seed}</Text>
-              <TouchableOpacity 
-                style={styles.seedButton}
-                onPress={() => setSeed(seed + 1)}
-              >
-                <Text style={styles.seedButtonText}>+</Text>
+          {selectedVideo && (
+            <View style={styles.selectedVideoInfo}>
+              <Text style={styles.selectedVideoText}>
+                ✅ Video selected: {selectedVideo.split('/').pop()}
+              </Text>
+              <TouchableOpacity style={styles.clearButton} onPress={clearSelection}>
+                <Text style={styles.clearButtonText}>Clear</Text>
               </TouchableOpacity>
             </View>
-          </View>
-
-          {/* CFGW */}
-          <View style={styles.parameterRow}>
-            <Text style={styles.parameterLabel}>CFGW: {cfgw.toFixed(2)}</Text>
-            <View style={styles.sliderContainer}>
-              <Text style={styles.sliderLabel}>0</Text>
-              <View style={styles.slider}>
-                <TouchableOpacity 
-                  style={[styles.sliderTrack, { width: `${cfgw * 100}%` }]}
-                  onPress={() => {}}
-                />
-              </View>
-              <Text style={styles.sliderLabel}>1</Text>
-            </View>
-          </View>
-        </View>
-
-        {/* Generate Button */}
-        <TouchableOpacity
-          style={[styles.generateButton, (isGenerating || !text.trim() || text.length > 300) && styles.generateButtonDisabled]}
-          onPress={generateTTSAudio}
-          disabled={isGenerating || !text.trim() || text.length > 300}
-        >
-          {isGenerating ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={styles.generateButtonText}>Generate Speech</Text>
           )}
-        </TouchableOpacity>
+        </View>
 
-        {/* Audio Controls */}
-        {audioUri && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Generated Audio</Text>
-            <View style={styles.audioControls}>
+        {selectedVideo && (
+          <View style={styles.settingsSection}>
+            <Text style={styles.settingsTitle}>Analysis Settings</Text>
+
+            <View style={styles.settingRow}>
+              <Text style={styles.settingLabel}>Pupil Selection:</Text>
+              <View style={styles.buttonGroup}>
+                {['both', 'left_pupil', 'right_pupil'].map((option) => (
+                  <TouchableOpacity
+                    key={option}
+                    style={[
+                      styles.optionButton,
+                      pupilSelection === option && styles.optionButtonActive
+                    ]}
+                    onPress={() => setPupilSelection(option)}
+                  >
+                    <Text style={[
+                      styles.optionButtonText,
+                      pupilSelection === option && styles.optionButtonTextActive
+                    ]}>
+                      {option === 'both' ? 'Both' : option === 'left_pupil' ? 'Left' : 'Right'}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+
+            <View style={styles.settingRow}>
+              <Text style={styles.settingLabel}>Model:</Text>
+              <View style={styles.buttonGroup}>
+                {['ResNet18', 'ResNet50'].map((model) => (
+                  <TouchableOpacity
+                    key={model}
+                    style={[
+                      styles.optionButton,
+                      tvModel === model && styles.optionButtonActive
+                    ]}
+                    onPress={() => setTvModel(model)}
+                  >
+                    <Text style={[
+                      styles.optionButtonText,
+                      tvModel === model && styles.optionButtonTextActive
+                    ]}>
+                      {model}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+
+            <View style={styles.settingRow}>
+              <Text style={styles.settingLabel}>Blink Detection:</Text>
               <TouchableOpacity
-                style={[styles.audioButton, isPlaying && styles.audioButtonActive]}
-                onPress={() => playAudio(audioUri)}
-                disabled={isPlaying}
+                style={[
+                  styles.toggleButton,
+                  blinkDetection && styles.toggleButtonActive
+                ]}
+                onPress={() => setBlinkDetection(!blinkDetection)}
               >
-                <Text style={styles.audioButtonText}>
-                  {isPlaying ? 'Playing...' : 'Play Audio'}
+                <Text style={[
+                  styles.toggleButtonText,
+                  blinkDetection && styles.toggleButtonTextActive
+                ]}>
+                  {blinkDetection ? 'ON' : 'OFF'}
                 </Text>
               </TouchableOpacity>
-
-              {isPlaying && (
-                <TouchableOpacity
-                  style={styles.audioButton}
-                  onPress={stopAudio}
-                >
-                  <Text style={styles.audioButtonText}>Stop</Text>
-                </TouchableOpacity>
-              )}
             </View>
           </View>
         )}
 
-        {/* History */}
-        {history.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Recent Generations</Text>
-            {history.map((item) => (
-              <View key={item.id} style={styles.historyItem}>
-                <View style={styles.historyHeader}>
-                  <Text style={styles.historyText} numberOfLines={2}>
-                    {item.text}
-                  </Text>
-                  <TouchableOpacity
-                    style={styles.historyPlayButton}
-                    onPress={() => playHistoryItem(item)}
-                  >
-                    <Text style={styles.historyPlayButtonText}>▶</Text>
-                  </TouchableOpacity>
-                </View>
-                <Text style={styles.historyTimestamp}>{item.timestamp}</Text>
-                <Text style={styles.historyParams}>
-                  Exag: {item.exaggeration.toFixed(2)} | Temp: {item.temperature.toFixed(2)} |
-                  Seed: {item.seed} | CFGW: {item.cfgw.toFixed(2)}
-                </Text>
+        {selectedVideo && (
+          <TouchableOpacity
+            style={[styles.analyzeButton, isAnalyzing && styles.analyzeButtonDisabled]}
+            onPress={analyzeVideo}
+            disabled={isAnalyzing}
+          >
+            {isAnalyzing ? (
+              <View style={styles.loadingContainer}>
+                <ActivityIndicator size="small" color="#fff" />
+                <Text style={styles.analyzeButtonText}>Analyzing...</Text>
               </View>
-            ))}
+            ) : (
+              <Text style={styles.analyzeButtonText}>🔍 Analyze Video</Text>
+            )}
+          </TouchableOpacity>
+        )}
+
+        {analysisResult && (
+          <View style={styles.resultsSection}>
+            <Text style={styles.resultsTitle}>
+              {analysisResult.success ? '✅ Analysis Results' : '❌ Analysis Failed'}
+            </Text>
+
+            {analysisResult.success ? (
+              <View>
+                {analysisResult.data?.analysisUrl && (
+                  <View style={styles.resultItem}>
+                    <Text style={styles.resultLabel}>Analysis Image:</Text>
+                    <Image
+                      source={{ uri: analysisResult.data.analysisUrl }}
+                      style={styles.resultImage}
+                      resizeMode="contain"
+                    />
+                  </View>
+                )}
+
+                {analysisResult.data?.summary && (
+                  <View style={styles.resultItem}>
+                    <Text style={styles.resultLabel}>Summary:</Text>
+                    <Text style={styles.resultText}>{analysisResult.data.summary}</Text>
+                  </View>
+                )}
+
+                {analysisResult.data?.metadata && (
+                  <View style={styles.resultItem}>
+                    <Text style={styles.resultLabel}>Details:</Text>
+                    <Text style={styles.resultText}>
+                      Endpoint: {analysisResult.data.metadata.workingEndpoint || 'Unknown'}
+                    </Text>
+                    <Text style={styles.resultText}>
+                      Processed: {new Date(analysisResult.data.metadata.timestamp).toLocaleString()}
+                    </Text>
+                  </View>
+                )}
+              </View>
+            ) : (
+              <Text style={styles.errorText}>{analysisResult.error}</Text>
+            )}
           </View>
         )}
       </ScrollView>
@@ -369,9 +313,6 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#f5f5f5',
   },
-  scrollView: {
-    flex: 1,
-  },
   scrollContent: {
     padding: 20,
   },
@@ -380,221 +321,188 @@ const styles = StyleSheet.create({
     marginBottom: 30,
   },
   title: {
-    fontSize: 28,
+    fontSize: 32,
     fontWeight: 'bold',
     color: '#333',
     marginBottom: 8,
   },
   subtitle: {
-    fontSize: 16,
+    fontSize: 18,
     color: '#666',
     textAlign: 'center',
+    marginBottom: 16,
   },
-  section: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 20,
+  testButton: {
+    backgroundColor: '#FF9500',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    marginTop: 8,
+  },
+  testButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  uploadSection: {
     marginBottom: 20,
-    shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 2,
-    },
-    shadowOpacity: 0.1,
-    shadowRadius: 3.84,
-    elevation: 5,
   },
-  sectionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+  uploadButton: {
+    backgroundColor: '#007AFF',
+    padding: 16,
+    borderRadius: 12,
     alignItems: 'center',
-    marginBottom: 15,
+    marginBottom: 16,
   },
-  sectionTitle: {
+  uploadButtonText: {
+    color: '#fff',
     fontSize: 18,
     fontWeight: '600',
-    color: '#333',
-    marginBottom: 15,
   },
-  textInput: {
-    borderWidth: 1,
-    borderColor: '#ddd',
+  selectedVideoInfo: {
+    backgroundColor: '#e8f5e8',
+    padding: 12,
     borderRadius: 8,
-    padding: 15,
-    fontSize: 16,
-    minHeight: 100,
-    textAlignVertical: 'top',
-    backgroundColor: '#fafafa',
-  },
-  textInfo: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: 10,
   },
-  charCount: {
+  selectedVideoText: {
+    color: '#2d5a2d',
     fontSize: 14,
-    color: '#666',
-  },
-  charCountError: {
-    color: '#e74c3c',
+    flex: 1,
   },
   clearButton: {
-    paddingHorizontal: 15,
-    paddingVertical: 8,
-    backgroundColor: '#f8f9fa',
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#dee2e6',
-  },
-  clearButtonText: {
-    color: '#6c757d',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  resetButton: {
+    backgroundColor: '#ff4444',
     paddingHorizontal: 12,
     paddingVertical: 6,
-    backgroundColor: '#f8f9fa',
     borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#dee2e6',
   },
-  resetButtonText: {
-    color: '#6c757d',
+  clearButtonText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  settingsSection: {
+    backgroundColor: '#fff',
+    padding: 16,
+    borderRadius: 12,
+    marginBottom: 20,
+  },
+  settingsTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#333',
+    marginBottom: 16,
+  },
+  settingRow: {
+    marginBottom: 16,
+  },
+  settingLabel: {
+    fontSize: 16,
+    color: '#333',
+    marginBottom: 8,
+    fontWeight: '500',
+  },
+  buttonGroup: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  optionButton: {
+    backgroundColor: '#f0f0f0',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#ddd',
+  },
+  optionButtonActive: {
+    backgroundColor: '#007AFF',
+    borderColor: '#007AFF',
+  },
+  optionButtonText: {
+    color: '#333',
     fontSize: 14,
     fontWeight: '500',
   },
-  parameterRow: {
-    marginBottom: 20,
-  },
-  parameterLabel: {
-    fontSize: 16,
-    fontWeight: '500',
-    color: '#333',
-    marginBottom: 10,
-  },
-  sliderContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  sliderLabel: {
-    fontSize: 12,
-    color: '#666',
-    width: 20,
-    textAlign: 'center',
-  },
-  slider: {
-    flex: 1,
-    height: 6,
-    backgroundColor: '#e9ecef',
-    borderRadius: 3,
-    position: 'relative',
-  },
-  sliderTrack: {
-    height: '100%',
-    backgroundColor: '#007bff',
-    borderRadius: 3,
-  },
-  seedControls: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 15,
-  },
-  seedButton: {
-    width: 40,
-    height: 40,
-    backgroundColor: '#007bff',
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  seedButtonText: {
+  optionButtonTextActive: {
     color: '#fff',
-    fontSize: 18,
-    fontWeight: 'bold',
   },
-  seedValue: {
-    fontSize: 16,
-    fontWeight: '500',
-    color: '#333',
-    minWidth: 30,
-    textAlign: 'center',
-  },
-  generateButton: {
-    backgroundColor: '#28a745',
-    paddingVertical: 15,
+  toggleButton: {
+    backgroundColor: '#f0f0f0',
+    paddingHorizontal: 20,
+    paddingVertical: 8,
     borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#ddd',
+    alignSelf: 'flex-start',
+  },
+  toggleButtonActive: {
+    backgroundColor: '#34C759',
+    borderColor: '#34C759',
+  },
+  toggleButtonText: {
+    color: '#333',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  toggleButtonTextActive: {
+    color: '#fff',
+  },
+  analyzeButton: {
+    backgroundColor: '#34C759',
+    padding: 16,
+    borderRadius: 12,
     alignItems: 'center',
     marginBottom: 20,
   },
-  generateButtonDisabled: {
-    backgroundColor: '#6c757d',
+  analyzeButtonDisabled: {
+    backgroundColor: '#999',
   },
-  generateButtonText: {
+  analyzeButtonText: {
     color: '#fff',
     fontSize: 18,
     fontWeight: '600',
   },
-  audioControls: {
+  loadingContainer: {
     flexDirection: 'row',
-    gap: 10,
-  },
-  audioButton: {
-    flex: 1,
-    backgroundColor: '#007bff',
-    paddingVertical: 12,
-    borderRadius: 8,
     alignItems: 'center',
+    gap: 8,
   },
-  audioButtonActive: {
-    backgroundColor: '#0056b3',
+  resultsSection: {
+    backgroundColor: '#fff',
+    padding: 16,
+    borderRadius: 12,
   },
-  audioButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '500',
-  },
-  historyItem: {
-    borderBottomWidth: 1,
-    borderBottomColor: '#eee',
-    paddingBottom: 15,
-    marginBottom: 15,
-  },
-  historyHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 8,
-  },
-  historyText: {
-    flex: 1,
-    fontSize: 14,
+  resultsTitle: {
+    fontSize: 18,
+    fontWeight: '600',
     color: '#333',
-    marginRight: 10,
+    marginBottom: 16,
   },
-  historyPlayButton: {
-    width: 30,
-    height: 30,
-    backgroundColor: '#007bff',
-    borderRadius: 15,
-    justifyContent: 'center',
-    alignItems: 'center',
+  resultItem: {
+    marginBottom: 16,
   },
-  historyPlayButtonText: {
-    color: '#fff',
-    fontSize: 12,
-  },
-  historyTimestamp: {
-    fontSize: 12,
-    color: '#666',
+  resultLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#333',
     marginBottom: 4,
   },
-  historyParams: {
-    fontSize: 11,
-    color: '#999',
+  resultText: {
+    fontSize: 14,
+    color: '#666',
+    lineHeight: 20,
+  },
+  resultImage: {
+    width: '100%',
+    height: 200,
+    borderRadius: 8,
+    backgroundColor: '#f0f0f0',
+  },
+  errorText: {
+    color: '#ff4444',
+    fontSize: 14,
+    lineHeight: 20,
   },
 });
-
-export default TTSScreen;
