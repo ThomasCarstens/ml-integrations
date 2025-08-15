@@ -9,6 +9,12 @@ const logger = require("firebase-functions/logger");
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const admin = require('firebase-admin');
+
+// Initialize Firebase Admin
+if (!admin.apps.length) {
+  admin.initializeApp();
+}
 
 // For cost control, set maximum number of containers
 setGlobalOptions({ maxInstances: 10 });
@@ -1048,3 +1054,197 @@ exports.testVideoUpload = onCall(async (request) => {
     };
   }
 });
+
+/**
+ * Process result.txt data and save to Firebase Realtime Database
+ * This function handles the cognitive fatigue analysis results
+ */
+exports.processAnalysisResult = onCall(async (request) => {
+  try {
+    const { data } = request;
+    const { resultText, uid = 'demo-user-12345', metadata = {} } = data;
+
+    if (!resultText) {
+      throw new Error('Result text is required');
+    }
+
+    logger.info("Processing analysis result", {
+      uid,
+      resultTextLength: resultText.length,
+      hasMetadata: !!metadata
+    });
+
+    // Parse the result.txt format data
+    const analysisData = parseResultData(resultText);
+
+    // Add metadata and timestamp
+    const completeAnalysisData = {
+      ...analysisData,
+      metadata: {
+        ...metadata,
+        timestamp: admin.database.ServerValue.TIMESTAMP,
+        processedAt: new Date().toISOString()
+      },
+      uid,
+      date: new Date().toISOString().split('T')[0] // YYYY-MM-DD format
+    };
+
+    // Save to Firebase Realtime Database
+    const db = admin.database();
+    const analysisRef = db.ref(`users/${uid}/analyses`).push();
+    await analysisRef.set(completeAnalysisData);
+
+    logger.info("Analysis result saved successfully", {
+      uid,
+      analysisId: analysisRef.key,
+      fatigueLevel: analysisData.fatigueLevel
+    });
+
+    return {
+      success: true,
+      data: {
+        analysisId: analysisRef.key,
+        fatigueLevel: analysisData.fatigueLevel,
+        summary: analysisData.summary,
+        leftEyeStats: analysisData.leftEyeStats,
+        rightEyeStats: analysisData.rightEyeStats
+      }
+    };
+
+  } catch (error) {
+    logger.error("Failed to process analysis result", {
+      error: error.message,
+      stack: error.stack
+    });
+
+    return {
+      success: false,
+      error: error.message || "Unknown error occurred"
+    };
+  }
+});
+
+/**
+ * Parse result.txt format data
+ */
+function parseResultData(resultText) {
+  const lines = resultText.split('\n').filter(line => line.trim());
+  const pupilData = [];
+  let summary = '';
+  let inSummarySection = false;
+  let inCSVSection = false;
+
+  for (const line of lines) {
+    const trimmedLine = line.trim();
+
+    // Check for summary section
+    if (trimmedLine.includes('Processed') && trimmedLine.includes('frames')) {
+      inSummarySection = true;
+      summary += trimmedLine + '\n';
+      continue;
+    }
+
+    // Check for CSV section
+    if (trimmedLine === '--- CSV Data ---') {
+      inCSVSection = true;
+      continue;
+    }
+
+    // Skip CSV header
+    if (trimmedLine === 'Frame,Eye_Type,Diameter_mm') {
+      continue;
+    }
+
+    // Parse summary lines
+    if (inSummarySection && !inCSVSection) {
+      if (trimmedLine.includes('Eye:') || trimmedLine.includes('Mean:') ||
+          trimmedLine.includes('Std:') || trimmedLine.includes('Min:') ||
+          trimmedLine.includes('Max:')) {
+        summary += trimmedLine + '\n';
+      }
+      continue;
+    }
+
+    // Parse CSV data or direct frame data
+    if (trimmedLine.includes(',')) {
+      const parts = trimmedLine.split(',');
+      if (parts.length >= 3) {
+        const frame = parseInt(parts[0]);
+        const eye = parts[1];
+        const diameter = parseFloat(parts[2]);
+
+        if (!isNaN(frame) && !isNaN(diameter) && (eye === 'left_eye' || eye === 'right_eye')) {
+          pupilData.push({ frame, eye, diameter });
+        }
+      }
+    }
+  }
+
+  // Calculate statistics
+  const leftEyeStats = calculateEyeStats(pupilData, 'left_eye');
+  const rightEyeStats = calculateEyeStats(pupilData, 'right_eye');
+
+  // Determine fatigue level
+  const fatigueLevel = determineFatigueLevel(leftEyeStats, rightEyeStats);
+
+  return {
+    leftEyeStats: leftEyeStats.mean > 0 ? leftEyeStats : null,
+    rightEyeStats: rightEyeStats.mean > 0 ? rightEyeStats : null,
+    summary: summary.trim(),
+    fatigueLevel,
+    pupilData,
+    frameCount: pupilData.length > 0 ? Math.max(...pupilData.map(d => d.frame)) + 1 : 0
+  };
+}
+
+/**
+ * Calculate statistics for eye data
+ */
+function calculateEyeStats(data, eye) {
+  const eyeData = data.filter(d => d.eye === eye).map(d => d.diameter);
+
+  if (eyeData.length === 0) {
+    return { mean: 0, std: 0, min: 0, max: 0 };
+  }
+
+  const mean = eyeData.reduce((sum, val) => sum + val, 0) / eyeData.length;
+  const variance = eyeData.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / eyeData.length;
+  const std = Math.sqrt(variance);
+  const min = Math.min(...eyeData);
+  const max = Math.max(...eyeData);
+
+  return { mean, std, min, max };
+}
+
+/**
+ * Determine fatigue level based on pupil statistics
+ */
+function determineFatigueLevel(leftStats, rightStats) {
+  if (!leftStats && !rightStats) return 'moderate';
+
+  let avgPupilSize = 0;
+  let count = 0;
+
+  if (leftStats && leftStats.mean > 0) {
+    avgPupilSize += leftStats.mean;
+    count++;
+  }
+
+  if (rightStats && rightStats.mean > 0) {
+    avgPupilSize += rightStats.mean;
+    count++;
+  }
+
+  if (count === 0) return 'moderate';
+
+  avgPupilSize /= count;
+
+  // Thresholds based on typical pupil diameter ranges
+  if (avgPupilSize < 2.2) {
+    return 'high'; // High fatigue
+  } else if (avgPupilSize > 2.6) {
+    return 'low'; // Low fatigue (alert)
+  } else {
+    return 'moderate'; // Moderate fatigue
+  }
+}

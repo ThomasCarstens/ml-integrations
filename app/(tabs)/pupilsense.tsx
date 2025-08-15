@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import { generatePupilAnalysis } from '../../lib/firebase';
+import { processEyeTestResult } from '../../services/eyeTestService';
 
 interface AnalysisResult {
   success: boolean;
@@ -75,8 +76,42 @@ export default function PupilSenseScreen() {
       console.log('Analysis result:', result);
       setAnalysisResult(result);
 
-      if (result.success) {
-        Alert.alert('Analysis Complete', 'Pupil analysis completed successfully!');
+      if (result.success && result.data?.results) {
+        // Save to eye test database as well
+        try {
+          console.log('Saving eye test result...');
+          const eyeTestResult = await processEyeTestResult(
+            result.data.results, // The raw analysis results
+            result.data.analysisUrl,
+            {
+              ...result.data.metadata,
+              source: 'pupilsense_analysis',
+              originalAnalysis: true
+            },
+            'pupil_analysis',
+            30, // Default test duration
+            {
+              pupilSelection: 'both',
+              tvModel: 'ResNet18',
+              blinkDetection: true
+            }
+          );
+
+          if (eyeTestResult.success) {
+            console.log('Eye test result saved successfully');
+            Alert.alert(
+              '✅ Analysis Complete',
+              'Pupil analysis completed and saved to your eye test history!',
+              [{ text: 'View Dashboard', style: 'default' }]
+            );
+          } else {
+            console.warn('Failed to save eye test result:', eyeTestResult.error);
+            Alert.alert('Analysis Complete', 'Pupil analysis completed successfully!');
+          }
+        } catch (eyeTestError) {
+          console.error('Error saving eye test result:', eyeTestError);
+          Alert.alert('Analysis Complete', 'Pupil analysis completed successfully!');
+        }
       } else {
         Alert.alert('Analysis Failed', result.error || 'Unknown error occurred');
       }
